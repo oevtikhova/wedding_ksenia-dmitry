@@ -3,7 +3,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- НАСТРОЙКИ (ЗАМЕНИТЕ НА СВОИ) ---
-BOT_TOKEN = 'СЮДА_ВСТАВЬТЕ_НОВЫЙ_ТОКЕН'
+BOT_TOKEN = '8627939314:AAFV0_NMZpL6jm9RTh8ZiWu9TpalwetSpOw'
 GROUP_CHAT_ID = -1004353135218
 
 # Список заданий для квеста
