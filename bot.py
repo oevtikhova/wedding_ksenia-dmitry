@@ -1,10 +1,31 @@
 import logging
-from telegram import Update
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+from telegram import Update, ChatMember
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- НАСТРОЙКИ (ЗАМЕНИТЕ НА СВОИ) ---
-BOT_TOKEN = '8627939314:AAFV0_NMZpL6jm9RTh8ZiWu9TpalwetSpOw'
-GROUP_CHAT_ID = -1004353135218
+
+# --- НАСТРОЙКИ ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8627939314:AAFV0_NMZpL6jm9RTh8ZiWu9TpalwetSpOw")
+GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "-1004353135218"))
+
+# Интервал между заданиями (в секундах). 900 = 15 минут
+TASK_INTERVAL = 900
+
+# Приветственное сообщение — отправляется при старте квеста
+INTRO = (
+    "💍 <b>Дорогие гости!</b> 💍\n\n"
+    "Сегодня у нас необычный вечер — мы запускаем <b>свадебный квест</b>! 🎉\n\n"
+    "<b>Правила простые:</b>\n"
+    "• Каждые 15 минут сюда будет приходить новое задание.\n"
+    "• Выполняйте его всей компанией и присылайте результат в этот чат.\n"
+    "• Это может быть фото, видео, текст или голосовое — как подскажет задание.\n"
+    "• Не бойтесь фантазировать! Лучшие моменты попадут в общий фотоальбом.\n\n"
+    "<b>Готовы?</b> Первое задание уже летит! 🚀\n\n"
+    "<i>С любовью, Ксения и Дмитрий 💕</i>"
+)
 
 # Список заданий для квеста
 TASKS = [
@@ -20,30 +41,130 @@ TASKS = [
 
 current_task_index = 0
 
+
+# --- Логирование ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
+
+# --- Мини-сервер для Render (чтобы не было "No open ports") ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
+# --- Проверка, что пользователь — админ группы ---
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.message.from_user.id
+    try:
+        member = await context.bot.get_chat_member(GROUP_CHAT_ID, user_id)
+        return member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
+    except Exception as e:
+        print(f"Ошибка проверки админа: {e}")
+        return False
+
+
+# --- Отправка одного задания ---
 async def send_scheduled_task(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отправляет следующее задание из списка в группу."""
     global current_task_index
     if current_task_index < len(TASKS):
         task_text = TASKS[current_task_index]
-        await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=f"🎉 <b>Новое задание!</b>\n\n{task_text}\n\n📸 Присылайте результат в этот чат!",
-            parse_mode='HTML'
-        )
-        print(f"Задание №{current_task_index + 1} отправлено.")
-        current_task_index += 1
+        try:
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=f"🎉 <b>Задание №{current_task_index + 1}</b>\n\n{task_text}\n\n📸 Присылайте результат в этот чат!",
+                parse_mode='HTML'
+            )
+            print(f"Задание №{current_task_index + 1} отправлено.")
+            current_task_index += 1
+        except Exception as e:
+            print(f"Ошибка отправки задания: {e}")
     else:
         print("Все задания выполнены!")
 
+
+# --- КОМАНДЫ УПРАВЛЕНИЯ ---
+
+async def start_quest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запуск квеста. Только для админов."""
+    if not await is_admin(update, context):
+        await update.message.reply_text("Эту команду может использовать только организатор. 🙅")
+        return
+
+    global current_task_index
+    current_task_index = 0  # сбрасываем на начало
+
+    # Убираем старые задачи, если были
+    job_queue = context.application.job_queue
+    for job in job_queue.get_jobs_by_name("quest_task"):
+        job.schedule_removal()
+
+    # Запускаем цикл: первое задание через 5 секунд, потом каждые TASK_INTERVAL
+    job_queue.run_repeating(
+        send_scheduled_task,
+        interval=TASK_INTERVAL,
+        first=5,
+        name="quest_task"
+    )
+
+    await update.message.reply_text(
+        f"🎉 <b>Квест запущен!</b>\n\nПервое задание придёт через несколько секунд, "
+        f"дальше — каждые {TASK_INTERVAL // 60} минут.\n\n"
+        f"Команды:\n"
+        f"/next — отправить следующее задание сейчас\n"
+        f"/reset — сбросить и начать заново\n"
+        f"/stop — остановить квест",
+        parse_mode='HTML'
+    )
+
+
+async def next_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправить следующее задание немедленно. Только для админов."""
+    if not await is_admin(update, context):
+        return
+    await send_scheduled_task(context)
+
+
+async def reset_quest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сбросить счётчик. Только для админов."""
+    if not await is_admin(update, context):
+        return
+    global current_task_index
+    current_task_index = 0
+    await update.message.reply_text("🔄 Счётчик заданий сброшен. Следующее задание будет №1.")
+
+
+async def stop_quest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Остановить рассылку. Только для админов."""
+    if not await is_admin(update, context):
+        return
+    job_queue = context.application.job_queue
+    removed = 0
+    for job in job_queue.get_jobs_by_name("quest_task"):
+        job.schedule_removal()
+        removed += 1
+    await update.message.reply_text(f"⏹ Квест остановлен (удалено задач: {removed}).")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Привет! Я бот для свадебного квеста. Добавь меня в группу, и я буду присылать задания! 🥳"
+        "Привет! Я бот для свадебного квеста. 🎉\n\n"
+        "Когда будете готовы начать — напишите /start_quest."
     )
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.message.from_user.first_name
@@ -51,6 +172,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🔥 {user_name}, огонь! Задание в копилке!",
         reply_to_message_id=update.message.message_id
     )
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
@@ -61,19 +183,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_to_message_id=update.message.message_id
         )
 
+
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Планировщик: каждые 15 минут (900 сек), первое задание — через 10 секунд
-    job_queue = application.job_queue
-    job_queue.run_repeating(send_scheduled_task, interval=900, first=10)
-
+    # Регистрируем команды
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start_quest", start_quest))
+    application.add_handler(CommandHandler("next", next_task))
+    application.add_handler(CommandHandler("reset", reset_quest))
+    application.add_handler(CommandHandler("stop", stop_quest))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("Бот запущен и работает...")
+    # Мини-сервер для Render
+    threading.Thread(target=run_health_server, daemon=True).start()
+
+    print("Бот запущен и работает. Ожидание команды /start_quest...")
     application.run_polling()
+
 
 if __name__ == '__main__':
     main()
