@@ -14,7 +14,8 @@ GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "-1004353135218"))
 # Интервал между заданиями (в секундах). 900 = 15 минут
 TASK_INTERVAL = 900
 
-# Приветственное сообщение — отправляется при старте квеста
+
+# --- ПРИВЕТСТВЕННОЕ СООБЩЕНИЕ ---
 INTRO = (
     "💍 <b>Дорогие гости!</b> 💍\n\n"
     "Сегодня у нас необычный вечер — мы запускаем <b>свадебный квест</b>! 🎉\n\n"
@@ -27,7 +28,8 @@ INTRO = (
     "<i>С любовью, Ксения и Дмитрий 💕</i>"
 )
 
-# Список заданий для квеста
+
+# --- СПИСОК ЗАДАНИЙ ---
 TASKS = [
     "Сделайте селфи с гостем, которого видите впервые 😄",
     "Найдите в автобусе человека в самых ярких носках и сфотографируйте его 🧦",
@@ -49,7 +51,7 @@ logging.basicConfig(
 )
 
 
-# --- Мини-сервер для Render (чтобы не было "No open ports") ---
+# --- Мини-сервер для Render ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -105,27 +107,36 @@ async def start_quest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     global current_task_index
-    current_task_index = 0  # сбрасываем на начало
+    current_task_index = 0
 
-    # Убираем старые задачи, если были
     job_queue = context.application.job_queue
     for job in job_queue.get_jobs_by_name("quest_task"):
         job.schedule_removal()
 
-    # Запускаем цикл: первое задание через 5 секунд, потом каждые TASK_INTERVAL
+    # 1. Приветствие — в группу
+    await context.bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text=INTRO,
+        parse_mode='HTML'
+    )
+
+    # 2. Запускаем цикл заданий (первое через 8 секунд)
     job_queue.run_repeating(
         send_scheduled_task,
         interval=TASK_INTERVAL,
-        first=5,
+        first=8,
         name="quest_task"
     )
 
+    # 3. Подтверждение — только организатору (в личку)
     await update.message.reply_text(
-        f"🎉 <b>Квест запущен!</b>\n\nПервое задание придёт через несколько секунд, "
-        f"дальше — каждые {TASK_INTERVAL // 60} минут.\n\n"
-        f"Команды:\n"
+        f"✅ Квест запущен!\n\n"
+        f"Приветствие ушло в группу.\n"
+        f"Первое задание — через 8 секунд.\n"
+        f"Дальше — каждые {TASK_INTERVAL // 60} минут.\n\n"
+        f"<b>Команды управления:</b>\n"
         f"/next — отправить следующее задание сейчас\n"
-        f"/reset — сбросить и начать заново\n"
+        f"/reset — сбросить и начать с №1\n"
         f"/stop — остановить квест",
         parse_mode='HTML'
     )
@@ -187,7 +198,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Регистрируем команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("start_quest", start_quest))
     application.add_handler(CommandHandler("next", next_task))
@@ -196,7 +206,6 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Мини-сервер для Render
     threading.Thread(target=run_health_server, daemon=True).start()
 
     print("Бот запущен и работает. Ожидание команды /start_quest...")
